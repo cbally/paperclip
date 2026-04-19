@@ -67,8 +67,6 @@ ENV NODE_ENV=production \
   USER_UID=${USER_UID} \
   USER_GID=${USER_GID} \
   PAPERCLIP_CONFIG=/paperclip/instances/default/config.json \
-  PAPERCLIP_DEPLOYMENT_MODE=cloud_public \
-  PAPERCLIP_DEPLOYMENT_EXPOSURE=public \
   OPENCODE_ALLOW_ALL_MODELS=true
 
 VOLUME ["/paperclip"]
