@@ -26,4 +26,7 @@ if [ "$changed" = "1" ]; then
     chown -R node:node /paperclip
 fi
 
+# Remove persisted config to ensure env vars take precedence
+rm -f /paperclip/instances/default/config.json
+
 exec gosu node "$@"
