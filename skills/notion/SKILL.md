@@ -12,6 +12,14 @@ description: >
 
 Interact with Notion via the REST API. All requests use `NOTION_API_KEY`.
 
+## Rules
+
+- ALWAYS include `children` when creating a page — never create empty pages
+- To write a full article, use `children` with heading_1, heading_2, paragraph, bulleted_list_item blocks
+- Never use `jq` to filter curl responses during creation — log the raw response to verify success
+- If a database ID is in the issue URL (notion.so/xxx/DATABASE_ID?v=...), extract it directly without searching
+- Write JSON payloads to a temp file when the body is large, then pass with `-d @/tmp/notion_payload.json`
+
 ## Setup
 
 ```bash
@@ -78,6 +86,87 @@ curl -s "https://api.notion.com/v1/pages" "${NOTION_HEADERS[@]}" \
       "Tags": { "multi_select": [{ "name": "urgent" }] }
     }
   }'
+```
+
+### Create a page with content (properties + blocks)
+
+**Always use this form — never create pages without `children`.**
+
+For large payloads, write to a file first:
+
+```bash
+cat > /tmp/notion_payload.json << 'EOF'
+{
+  "parent": { "database_id": "DATABASE_ID_HERE" },
+  "properties": {
+    "Name": { "title": [{ "text": { "content": "Mon article" } }] },
+    "Status": { "select": { "name": "Draft" } }
+  },
+  "children": [
+    {
+      "object": "block",
+      "type": "heading_1",
+      "heading_1": {
+        "rich_text": [{ "type": "text", "text": { "content": "Titre principal" } }]
+      }
+    },
+    {
+      "object": "block",
+      "type": "heading_2",
+      "heading_2": {
+        "rich_text": [{ "type": "text", "text": { "content": "Introduction" } }]
+      }
+    },
+    {
+      "object": "block",
+      "type": "paragraph",
+      "paragraph": {
+        "rich_text": [{ "type": "text", "text": { "content": "Contenu de l'introduction ici." } }]
+      }
+    },
+    {
+      "object": "block",
+      "type": "heading_2",
+      "heading_2": {
+        "rich_text": [{ "type": "text", "text": { "content": "Points clés" } }]
+      }
+    },
+    {
+      "object": "block",
+      "type": "bulleted_list_item",
+      "bulleted_list_item": {
+        "rich_text": [{ "type": "text", "text": { "content": "Premier point" } }]
+      }
+    },
+    {
+      "object": "block",
+      "type": "bulleted_list_item",
+      "bulleted_list_item": {
+        "rich_text": [{ "type": "text", "text": { "content": "Deuxième point" } }]
+      }
+    },
+    {
+      "object": "block",
+      "type": "paragraph",
+      "paragraph": {
+        "rich_text": [{ "type": "text", "text": { "content": "Conclusion ici." } }]
+      }
+    }
+  ]
+}
+EOF
+
+curl -s "https://api.notion.com/v1/pages" "${NOTION_HEADERS[@]}" \
+  -X POST \
+  -d @/tmp/notion_payload.json
+```
+
+After creation, always verify the page is not empty:
+
+```bash
+PAGE_ID="<id from response>"
+curl -s "https://api.notion.com/v1/blocks/$PAGE_ID/children" "${NOTION_HEADERS[@]}" | jq '.results | length'
+# Must be > 1, otherwise the page is empty — use "Append blocks" to fix it
 ```
 
 ### Update page properties
