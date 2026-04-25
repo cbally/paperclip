@@ -11,6 +11,7 @@ const FILE_KEY = "instructionsFilePath";
 const PROMPT_KEY = "promptTemplate";
 /** @deprecated Use the managed instructions bundle system instead. */
 const BOOTSTRAP_PROMPT_KEY = "bootstrapPromptTemplate";
+const SNAPSHOT_KEY = "instructionsBundleSnapshot";
 const LEGACY_PROMPT_TEMPLATE_PATH = "promptTemplate.legacy.md";
 const IGNORED_INSTRUCTIONS_FILE_NAMES = new Set([".DS_Store", "Thumbs.db", "Desktop.ini"]);
 const IGNORED_INSTRUCTIONS_DIRECTORY_NAMES = new Set([
@@ -89,6 +90,23 @@ function asString(value: unknown): string | null {
 
 function isBundleMode(value: unknown): value is BundleMode {
   return value === "managed" || value === "external";
+}
+
+function readSnapshot(config: Record<string, unknown>): Record<string, string> | null {
+  const raw = config[SNAPSHOT_KEY];
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const entries = Object.entries(raw as Record<string, unknown>).filter(
+    ([, v]) => typeof v === "string",
+  ) as [string, string][];
+  return entries.length > 0 ? Object.fromEntries(entries) : null;
+}
+
+function applySnapshot(
+  config: Record<string, unknown>,
+  files: Record<string, string>,
+): Record<string, unknown> {
+  const existing = readSnapshot(config) ?? {};
+  return { ...config, [SNAPSHOT_KEY]: { ...existing, ...files } };
 }
 
 function inferLanguage(relativePath: string): string {
@@ -276,7 +294,26 @@ function deriveBundleState(agent: AgentLike): BundleState {
 async function recoverManagedBundleState(agent: AgentLike, state: BundleState): Promise<BundleState> {
   const managedRootPath = resolveManagedInstructionsRoot(agent);
   const stat = await statIfExists(managedRootPath);
-  if (!stat?.isDirectory()) return state;
+
+  // If the managed directory is missing or empty (e.g. after a container redeploy),
+  // restore from the DB snapshot so instructions survive restarts.
+  const dirMissingOrEmpty = !stat?.isDirectory()
+    || (await listFilesRecursive(managedRootPath)).length === 0;
+
+  if (dirMissingOrEmpty && state.mode === "managed") {
+    const snapshot = readSnapshot(state.config);
+    if (snapshot && Object.keys(snapshot).length > 0) {
+      await fs.mkdir(managedRootPath, { recursive: true });
+      for (const [relativePath, content] of Object.entries(snapshot)) {
+        const absolutePath = resolvePathWithinRoot(managedRootPath, relativePath);
+        await fs.mkdir(path.dirname(absolutePath), { recursive: true });
+        await fs.writeFile(absolutePath, content, "utf8");
+      }
+    }
+  }
+
+  const statAfterRestore = dirMissingOrEmpty ? await statIfExists(managedRootPath) : stat;
+  if (!statAfterRestore?.isDirectory()) return state;
 
   const files = await listFilesRecursive(managedRootPath);
   if (files.length === 0) return state;
@@ -621,15 +658,17 @@ export function agentInstructionsService() {
     }
 
     const prepared = await ensureWritableBundle(agent, options);
-    const absolutePath = resolvePathWithinRoot(prepared.state.rootPath!, relativePath);
+    const normalizedPath = normalizeRelativeFilePath(relativePath);
+    const absolutePath = resolvePathWithinRoot(prepared.state.rootPath!, normalizedPath);
     await fs.mkdir(path.dirname(absolutePath), { recursive: true });
     await fs.writeFile(absolutePath, content, "utf8");
-    const nextAgent = { ...agent, adapterConfig: prepared.adapterConfig };
+    const adapterConfigWithSnapshot = applySnapshot(prepared.adapterConfig, { [normalizedPath]: content });
+    const nextAgent = { ...agent, adapterConfig: adapterConfigWithSnapshot };
     const [bundle, file] = await Promise.all([
       getBundle(nextAgent),
-      readFile(nextAgent, relativePath),
+      readFile(nextAgent, normalizedPath),
     ]);
-    return { bundle, file, adapterConfig: prepared.adapterConfig };
+    return { bundle, file, adapterConfig: adapterConfigWithSnapshot };
   }
 
   async function deleteFile(agent: AgentLike, relativePath: string): Promise<{
@@ -712,12 +751,17 @@ export function agentInstructionsService() {
       await fs.writeFile(resolvePathWithinRoot(rootPath, entryFile), "", "utf8");
     }
 
-    const adapterConfig = applyBundleConfig(asRecord(agent.adapterConfig), {
+    const baseConfig = applyBundleConfig(asRecord(agent.adapterConfig), {
       mode: "managed",
       rootPath,
       entryFile,
       clearLegacyPromptTemplate: options?.clearLegacyPromptTemplate,
     });
+    const snapshotFiles = Object.fromEntries(normalizedEntries);
+    if (!normalizedEntries.some(([p]) => p === entryFile)) {
+      snapshotFiles[entryFile] = "";
+    }
+    const adapterConfig = applySnapshot(baseConfig, snapshotFiles);
     const bundle = await getBundle({ ...agent, adapterConfig });
     return { bundle, adapterConfig };
   }
