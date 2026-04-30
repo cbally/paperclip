@@ -1,156 +1,158 @@
 ---
 name: odoo
 description: >
-  Interact with the Odoo CRM and ERP via its JSON-RPC 2.0 API. Use this skill
+  Interact with the Odoo CRM and ERP via its XML-RPC API (Python). Use this skill
   whenever you need to read or write Odoo data: contacts, leads/opportunities,
   sales orders, invoices, projects, or any other Odoo model. Triggers: "liste
   les contacts Odoo", "crée un lead", "mets à jour l'opportunité", "cherche dans
   Odoo", "récupère les devis", or any request involving Odoo data.
+  IMPORTANT: Always use Python + xmlrpc.client. Never use curl or JSON-RPC HTTP calls.
 ---
 
-# Odoo Skill
+# Odoo Skill — XML-RPC (Python)
 
-Interact with Odoo via JSON-RPC 2.0. All calls go to `$ODOO_URL`.
+**Always use Python with `xmlrpc.client`. Never use curl, requests, or `/web/dataset/call_kw`.**
 
 ## Setup
 
-```bash
-source .env.integrations   # or: export ODOO_URL=... ODOO_DB=... ODOO_API_KEY=...
-```
+```python
+import xmlrpc.client, os
 
-Required variables: `ODOO_URL`, `ODOO_DB`, and either `ODOO_API_KEY` or `ODOO_USER`+`ODOO_PASSWORD`.
+ODOO_URL      = os.environ["ODOO_URL"]       # e.g. https://myodoo.com
+ODOO_DB       = os.environ["ODOO_DB"]
+ODOO_USERNAME = os.environ["ODOO_USERNAME"]
+ODOO_PASSWORD = os.environ["ODOO_PASSWORD"]
+```
 
 ## Authentication
 
-### Preferred: API Key (Odoo 16+)
+```python
+common = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/common")
+uid    = common.authenticate(ODOO_DB, ODOO_USERNAME, ODOO_PASSWORD, {})
+if not uid:
+    raise PermissionError("Authentification Odoo échouée.")
 
-Use the API key directly as the password with user `__api__` — no session needed:
-
-```bash
-curl -s "$ODOO_URL/web/dataset/call_kw" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "jsonrpc": "2.0", "method": "call", "id": 1,
-    "params": {
-      "model": "res.partner",
-      "method": "search_read",
-      "args": [[["is_company", "=", true]]],
-      "kwargs": {
-        "fields": ["name", "email", "phone"],
-        "limit": 10,
-        "context": {"db": "'"$ODOO_DB"'"}
-      }
-    }
-  }' \
-  -u "__api__:$ODOO_API_KEY"
+models = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/object")
 ```
 
-### Fallback: Username + Password (session cookie)
+## Core Helper
 
-```bash
-# 1. Authenticate and get session cookie
-SESSION=$(curl -sc /tmp/odoo_cookie "$ODOO_URL/web/session/authenticate" \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","method":"call","id":1,"params":{"db":"'"$ODOO_DB"'","login":"'"$ODOO_USER"'","password":"'"$ODOO_PASSWORD"'"}}')
-
-# 2. Use cookie for subsequent calls
-curl -sb /tmp/odoo_cookie "$ODOO_URL/web/dataset/call_kw" \
-  -H "Content-Type: application/json" \
-  -d '{...}'
-```
-
-## Core Pattern: call_kw
-
-Every Odoo model operation follows the same structure:
-
-```bash
-curl -s "$ODOO_URL/web/dataset/call_kw" \
-  -H "Content-Type: application/json" \
-  -u "__api__:$ODOO_API_KEY" \
-  -d '{
-    "jsonrpc": "2.0", "method": "call", "id": 1,
-    "params": {
-      "model": "<MODEL>",
-      "method": "<METHOD>",
-      "args": [<DOMAIN_OR_IDS>],
-      "kwargs": { <KWARGS> }
-    }
-  }'
+```python
+def x(model, method, domain_or_ids, **kwargs):
+    """Wrapper universel pour tous les appels ORM Odoo."""
+    return models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, model, method, [domain_or_ids], kwargs)
 ```
 
 ## Common Operations
 
 ### Search and read records
 
-```bash
-# search_read: filter + fetch fields in one call
-curl -s "$ODOO_URL/web/dataset/call_kw" -H "Content-Type: application/json" -u "__api__:$ODOO_API_KEY" \
-  -d '{"jsonrpc":"2.0","method":"call","id":1,"params":{"model":"crm.lead","method":"search_read",
-    "args":[[["stage_id.name","=","New"]]],"kwargs":{"fields":["name","partner_id","expected_revenue","probability"],"limit":20,"order":"expected_revenue desc"}}}'
+```python
+leads = x("crm.lead", "search_read",
+    [["active", "=", True], ["type", "=", "opportunity"]],
+    fields=["name", "stage_id", "expected_revenue", "probability",
+            "date_deadline", "partner_name", "user_id", "date_open"],
+    limit=100,
+    order="expected_revenue desc"
+)
+```
+
+### Search (IDs only)
+
+```python
+ids = x("crm.lead", "search",
+    [["type", "=", "opportunity"], ["active", "=", True]],
+    limit=50
+)
+```
+
+### Read specific records by ID
+
+```python
+records = x("crm.lead", "read",
+    [1, 2, 3],
+    fields=["name", "stage_id", "expected_revenue"]
+)
 ```
 
 ### Create a record
 
-```bash
-curl -s "$ODOO_URL/web/dataset/call_kw" -H "Content-Type: application/json" -u "__api__:$ODOO_API_KEY" \
-  -d '{"jsonrpc":"2.0","method":"call","id":1,"params":{"model":"crm.lead","method":"create",
-    "args":[{"name":"New opportunity","partner_id":42,"expected_revenue":5000}],"kwargs":{}}}'
-# Returns: {"result": <new_id>}
+```python
+new_id = x("crm.lead", "create",
+    {"name": "Nouvelle opportunité", "partner_name": "Acme", "expected_revenue": 5000},
+)
+# Returns: integer (new record ID)
 ```
 
 ### Update a record
 
-```bash
-curl -s "$ODOO_URL/web/dataset/call_kw" -H "Content-Type: application/json" -u "__api__:$ODOO_API_KEY" \
-  -d '{"jsonrpc":"2.0","method":"call","id":1,"params":{"model":"crm.lead","method":"write",
-    "args":[[<ID>],{"probability":80,"expected_revenue":8000}],"kwargs":{}}}'
-# Returns: {"result": true}
+```python
+success = x("crm.lead", "write",
+    [[42], {"probability": 80, "expected_revenue": 8000}]
+)
+# Returns: True
 ```
 
 ### Delete a record
 
-```bash
-curl -s "$ODOO_URL/web/dataset/call_kw" -H "Content-Type: application/json" -u "__api__:$ODOO_API_KEY" \
-  -d '{"jsonrpc":"2.0","method":"call","id":1,"params":{"model":"crm.lead","method":"unlink",
-    "args":[[<ID>]],"kwargs":{}}}'
+```python
+success = x("crm.lead", "unlink", [[42]])
+```
+
+### Inspect available fields on any model
+
+```python
+fields_info = models.execute_kw(
+    ODOO_DB, uid, ODOO_PASSWORD,
+    "crm.lead", "fields_get", [],
+    {"attributes": ["string", "type", "required"]}
+)
+available_fields = list(fields_info.keys())
+print(available_fields)
 ```
 
 ## Domain Syntax (filters)
 
-Domains are lists of triples `[field, operator, value]` combined with `&` (AND) or `|` (OR):
+Domains are lists of triples `[field, operator, value]`, AND by default, OR with `"|"` prefix:
 
-```json
-[["is_company","=",true], ["country_id.code","=","FR"]]           // AND (default)
-["|", ["email","ilike","@gmail"], ["email","ilike","@yahoo"]]      // OR
-[["active","=",true], ["stage_id.probability",">=",50]]
+```python
+[["is_company", "=", True], ["country_id.code", "=", "FR"]]        # AND (default)
+["|", ["email", "ilike", "@gmail"], ["email", "ilike", "@yahoo"]]   # OR
+[["active", "=", True], ["probability", ">=", 50]]
+[["active", "in", [True, False]]]                                   # include archived
 ```
 
 Operators: `=`, `!=`, `>`, `>=`, `<`, `<=`, `like`, `ilike`, `in`, `not in`, `child_of`
+
+## Defensive Field Handling
+
+**Always filter fields against available ones before a search_read** if there is any doubt
+(especially on Odoo 17+/19 where field names may differ):
+
+```python
+wanted_fields = ["name", "stage_id", "expected_revenue", "planned_revenue", "date_deadline"]
+available     = set(models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "crm.lead", "fields_get", [],
+                    {"attributes": ["string"]}).keys())
+fields        = [f for f in wanted_fields if f in available]
+missing       = [f for f in wanted_fields if f not in available]
+if missing:
+    print(f"[info] Champs absents : {missing}")
+```
 
 ## Key Models
 
 | Model | Usage |
 |-------|-------|
-| `res.partner` | Contacts, clients, suppliers |
-| `crm.lead` | Leads and opportunities |
-| `sale.order` | Sales orders / devis |
-| `account.move` | Invoices (type=`out_invoice`) |
-| `project.project` | Projects |
-| `project.task` | Tasks |
-| `hr.employee` | Employees |
-| `product.product` | Products |
-
-## Parsing Responses
-
-Odoo always returns `{"jsonrpc":"2.0","id":1,"result": <data>}`.  
-On error: `{"jsonrpc":"2.0","id":1,"error":{"code":200,"message":"...","data":{"message":"..."}}}`.
-
-Extract result with jq:
-```bash
-curl ... | jq '.result'
-curl ... | jq '.result[] | {id, name, email}'
-```
+| `res.partner` | Contacts, clients, fournisseurs |
+| `crm.lead` | Leads et opportunités |
+| `crm.stage` | Étapes du pipeline CRM |
+| `mail.activity` | Activités planifiées (relances, appels…) |
+| `sale.order` | Devis / commandes |
+| `account.move` | Factures (`move_type="out_invoice"`) |
+| `project.project` | Projets |
+| `project.task` | Tâches |
+| `res.users` | Utilisateurs |
 
 ## Reference
 
-See [references/api-reference.md](references/api-reference.md) for detailed endpoint docs and model field lists.
+See [references/api-reference.md](references/api-reference.md) for model field lists and query examples.
